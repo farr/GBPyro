@@ -12,7 +12,7 @@ code.
 Try out the command-line:
 
 ```shell
-python gbfit.py --seed 1792656085 --Tobs 6.28e7 --injfile testinj.dat --f0 1e-3 --sigma-f0 1e-8 --outfile testinj.nc
+python gbfit.py --seed 1792656085 --Tobs 6.28e7 --injfile testinj.dat --f0 1e-3 --sigma-f0 1.6e-8 --outfile testinj.nc
 ```
 
 And then have a look at the plots in `testinj.ipynb`.

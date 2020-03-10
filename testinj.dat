@@ -1,2 +1,2 @@
-A f0 fdot theta phi cos_iota psi phi0
-4.14e-24 1e-3 0.0 1.5708 0.0 1.0 0.0 0.0
+A f0 fdot fddot theta phi cos_iota psi phi0
+4.14e-24 1e-3 0.0 0.0 1.5708 0.0 1.0 0.0 0.0
