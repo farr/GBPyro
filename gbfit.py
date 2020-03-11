@@ -7,7 +7,6 @@ import os
 import os.path as op
 import pymc3 as pm
 import pymc3.math as pmm
-from pymc3.step_methods.hmc.quadpotential import QuadPotentialFull
 import theano
 import theano.tensor as tt
 import theano.tensor.fft as ttf
@@ -15,43 +14,15 @@ import warnings
 
 theano.config.gcc.cxxflags = "-Wno-c++11-narrowing"
 
-# Adapted from DFM's https://dfm.io/posts/pymc3-mass-matrix/
-def get_step_for_trace(trace=None, model=None,
-                       regular_window=1, regular_variance=1e-3,
-                       **kwargs):
-    model = pm.modelcontext(model)
+def dphis_from_fs(Tobs, f, fdot, fddot):
+    def phase(t):
+        return 2*pi*t*(f + t/2*(fdot + t/3*fddot))
 
-    # If not given, use the trivial metric
-    if trace is None:
-        potential = QuadPotentialFull(np.eye(model.ndim))
-        return pm.NUTS(potential=potential, **kwargs)
+    phi1 = phase(Tobs/3)
+    phi2 = phase(2*Tobs/3)
+    phi3 = phase(Tobs)
 
-    # Loop over samples and convert to the relevant parameter space;
-    # I'm sure that there's an easier way to do this, but I don't know
-    # how to make something work in general...
-    samples = np.empty((len(trace) * trace.nchains, model.ndim))
-    i = 0
-    for chain in trace._straces.values():
-        for p in chain:
-            samples[i] = model.bijection.map(p)
-            i += 1
-
-    # Compute the sample covariance
-    cov = np.cov(samples, rowvar=0)
-
-    # Stan uses a regularized estimator for the covariance matrix to
-    # be less sensitive to numerical issues for large parameter spaces.
-    # In the test case for this blog post, this isn't necessary and it
-    # actually makes the performance worse so I'll disable it, but I
-    # wanted to include the implementation here for completeness
-    N = len(samples)
-    cov = cov * N / (N + regular_window)
-    cov[np.diag_indices_from(cov)] += \
-        regular_variance * regular_window / (N + regular_window)
-
-    # Use the sample covariance as the inverse metric
-    potential = QuadPotentialFull(cov)
-    return pm.NUTS(potential=potential, **kwargs)
+    return array([phi1, phi2-phi1, phi3-phi2])
 
 # I sure hope L is in m
 def Sn(fs, L=5e9):
@@ -191,10 +162,10 @@ def y_slow(ts, f0, fdot, fddot, phi0, nhat, cos_iota, psi, fhet=None):
 
     return (ys_re, ys_im)
 
-def slow_bw(f0, fdot, Tobs, R=1):
+def slow_bw(f0, fdot, fddot, Tobs, R=1):
     fm = 1.0/(3600.0*24.0*365.25*R**(3.0/2.0))
 
-    return 2*(4 + 2*pi*f0*R*499.0047)*fm + abs(fdot*Tobs)  # 499.0047 is 1 AU in seconds
+    return 2*(4 + 2*pi*f0*R*499.0047)*fm + abs(fdot*Tobs) + 0.5*abs(fddot*Tobs*Tobs)  # 499.0047 is 1 AU in seconds
 
 def next_pow_two(N):
     i = 1
@@ -308,38 +279,40 @@ def AET_XYZ(X_re, X_im, Y_re, Y_im, Z_re, Z_im):
 
     return ((A_re, A_im), (E_re, E_im), (T_re, T_im))
 
-def make_model(f0_prior, sigma_f0_prior, sigma, hbin, lnAlow, lnAhigh):
+def make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, three_dphi_prior, sigma, hbin, lnAlow, lnAhigh, N, start_pt={}):
     with pm.Model() as model:
-        # We want to sample in the "centered" f, fdot, fddot, but parameterize
-        # in terms of the f0, fdot0, fddot0
-        fs_unit = pm.Normal('fs_unit', mu=0.0, sigma=1.0, shape=(3,))
+        _ = pm.Data('sigma', sigma)
+        _ = pm.Data('hbin', hbin)
+        _ = pm.Data('Tobs', Tobs)
+        _ = pm.Data('N', N)
+        A_re_data = pm.Data('A_re_data', A_re_data)
+        A_im_data = pm.Data('A_im_data', A_im_data)
+        E_re_data = pm.Data('E_re_data', E_re_data)
+        E_im_data = pm.Data('E_im_data', E_im_data)
 
-        f0mid = pm.Deterministic('f0mid', f0_prior + sigma_f0_prior*fs_unit[0])
-        fdotmid = pm.Deterministic('fdotmid', sigma_f0_prior/Tobs*fs_unit[1])
-        fddotmid = pm.Deterministic('fddotmid', 2.0*sigma_f0_prior/(Tobs*Tobs)*fs_unit[2])
-
-        f0 = pm.Deterministic('f0', f0mid - fdotmid*Tobs/2 + fddotmid*Tobs*Tobs/8)
-        fdot = pm.Deterministic('fdot', fdotmid - fddotmid*Tobs/2)
-        fddot = pm.Deterministic('fddot', fddotmid)
-
-        cos_iota = pm.Uniform('cos_iota', lower=-1, upper=1)
-        iota = pm.Deterministic('iota', tt.arccos(cos_iota))
-
-        # TODO: Need to sample efficiently on the torus that is 2*psi + phi and 2*psi - phi
-        # This 2-vector gives phi0
-        n_phi = pm.Normal('n_phi', mu=zeros(2), sigma=ones(2), shape=(2,), testval=randn(2))
+        n_phi = pm.Normal('n_phi', mu=zeros(2), sigma=ones(2), shape=(2,), testval=start_pt.get('n_phi', randn(2)))
         phi0 = pm.Deterministic('phi0', tt.arctan2(n_phi[1], n_phi[0]))
 
+        dphis = pm.Normal('dphis', mu=three_dphi_prior, sigma=2*pi/sqrt(3), shape=(3,), testval=start_pt.get('dphis', three_dphi_prior))
+        phis = phi0 + tt.cumsum(dphis)
+
+        f0 = pm.Deterministic('f0', -((11*phi0 - 18*phis[0] + 9*phis[1] - 2*phis[2])/(4*pi*Tobs)))
+        fdot = pm.Deterministic('fdot', (9*(2*phi0 - 5*phis[0] + 4*phis[1] - phis[2]))/(2*pi*Tobs*Tobs))
+        fddot = pm.Deterministic('fddot', -((27*(phi0 - 3*phis[0] + 3*phis[1] - phis[2]))/(2*pi*Tobs*Tobs*Tobs)))
+
+        cos_iota = pm.Uniform('cos_iota', lower=-1, upper=1, testval=start_pt.get('cos_iota', np.random.uniform(low=-1, high=1)))
+        iota = pm.Deterministic('iota', tt.arccos(cos_iota))
+
         # This 2-vector gives 2*psi
-        n_2psi = pm.Normal('n_2psi', mu=zeros(2), sigma=ones(2), shape=(2,), testval=randn(2))
+        n_2psi = pm.Normal('n_2psi', mu=zeros(2), sigma=ones(2), shape=(2,), testval=start_pt.get('n_2psi', randn(2)))
         psi = pm.Deterministic('psi', tt.arctan2(n_2psi[1], n_2psi[0])/2)
 
-        n_ra_dec = pm.Normal('n_ra_dec', mu=zeros(3), sigma=ones(3), shape=(3,), testval=randn(3))
+        n_ra_dec = pm.Normal('n_ra_dec', mu=zeros(3), sigma=ones(3), shape=(3,), testval=start_pt.get('nhat', randn(3)))
         nhat = pm.Deterministic('nhat', n_ra_dec / pmm.sqrt(tt.tensordot(n_ra_dec, n_ra_dec, axes=1)))
         _ = pm.Deterministic('phi', tt.arctan2(n_ra_dec[1], n_ra_dec[0]))
         _ = pm.Deterministic('theta', tt.arccos(nhat[2]))
 
-        lnA = pm.Uniform('lnA', lower=lnAlow, upper=lnAhigh)
+        lnA = pm.Uniform('lnA', lower=lnAlow, upper=lnAhigh, testval=start_pt.get('lnA', np.random.uniform(low=lnAlow, high=lnAhigh)))
         A = pm.Deterministic('A', pmm.exp(lnA))
 
         y_re, y_im = y_fd(Tobs, f0, fdot, fddot, phi0, nhat, cos_iota, psi, hbin, N)
@@ -351,12 +324,12 @@ def make_model(f0_prior, sigma_f0_prior, sigma, hbin, lnAlow, lnAhigh):
         E_re = pm.Deterministic('E_re', A*E_re)
         E_im = pm.Deterministic('E_im', A*E_im)
 
-        snr = pm.Deterministic('SNR', tt.sum(tt.square(A_re/sigma)) + tt.sum(tt.square(A_im/sigma)) + tt.sum(tt.square(E_re/sigma)) + tt.sum(tt.square(E_im/sigma)))
+        snr = pm.Deterministic('SNR', tt.sqrt(tt.sum(tt.square(A_re/sigma)) + tt.sum(tt.square(A_im/sigma)) + tt.sum(tt.square(E_re/sigma)) + tt.sum(tt.square(E_im/sigma))))
 
-        _ = pm.Normal('A_re_obs', mu=A_re, sigma=sigma, observed=A_re_data, shape=(A_re_data.shape[0],))
-        _ = pm.Normal('A_im_obs', mu=A_im, sigma=sigma, observed=A_im_data, shape=(A_im_data.shape[0],))
-        _ = pm.Normal('E_re_obs', mu=E_re, sigma=sigma, observed=E_re_data, shape=(E_re_data.shape[0],))
-        _ = pm.Normal('E_im_obs', mu=E_im, sigma=sigma, observed=E_im_data, shape=(E_im_data.shape[0],))
+        _ = pm.Normal('A_re_obs', mu=A_re, sigma=sigma, observed=A_re_data)
+        _ = pm.Normal('A_im_obs', mu=A_im, sigma=sigma, observed=A_im_data)
+        _ = pm.Normal('E_re_obs', mu=E_re, sigma=sigma, observed=E_re_data)
+        _ = pm.Normal('E_im_obs', mu=E_im, sigma=sigma, observed=E_im_data)
 
     return model
 
@@ -376,7 +349,8 @@ if __name__ == '__main__':
 
     priorg = parser.add_argument_group('Prior')
     priorg.add_argument('--f0', required=True, metavar='F0', type=float, help='guess at frequency')
-    priorg.add_argument('--sigma-f0', required=True, metavar='SF0', type=float, help='prior width for frequency')
+    priorg.add_argument('--fdot', required=True, metavar='FDOT', type=float, help='frequency derivative')
+    priorg.add_argument('--fddot', required=True, metavar='FDDOT', type=float, help='frequency second derivative')
     priorg.add_argument('--Amin', metavar='AMIN', type=float, default=4.1e-25, help='minimum amplitude in prior (default: %(default).2g)')
     priorg.add_argument('--Amax', metavar='AMAX', type=float, default=4.1e-22, help='maximum amplitude in prior (default: %(default).2g)')
 
@@ -385,11 +359,16 @@ if __name__ == '__main__':
     sampg.add_argument('--tune', metavar='N', type=int, help='number of tuning samples (default: same as --draws)')
     sampg.add_argument('--chains', metavar='N', type=int, default=3, help='number of independent chains (default: %(default)s)')
     sampg.add_argument('--cores', metavar='N', type=int, default=3, help='number of cores to use for sampling (default: %(default)s)')
+    sampg.add_argument('--diag-mass-matrix', action='store_true', help='use diagonal mass matrix')
+    sampg.add_argument('--start-point', metavar='FILE', help='start at the parameters in the given file')
 
     outg = parser.add_argument_group('Output')
     outg.add_argument('--outfile', metavar='FNAME', default='chain.nc', help='output file (default: %(default)s)')
 
     args = parser.parse_args()
+
+    if args.sample_seed is not None:
+        np.random.seed(args.sample_seed)
 
     if args.tune is None:
         n_tune = args.draws
@@ -398,10 +377,15 @@ if __name__ == '__main__':
 
     Tobs = args.Tobs
     f0 = args.f0
-    sigma_fdot = args.sigma_f0/Tobs
+    fdot = args.fdot
+    fddot = args.fddot
 
-    hbin = int(round(f0*Tobs))
-    N = next_pow_two(int(round(4*Tobs*slow_bw(f0, 3*sigma_fdot, Tobs))))
+    dphis = dphis_from_fs(Tobs, f0, fdot, fddot)
+
+    fmid = f0 + fdot*Tobs/2 + fddot*Tobs/8
+
+    hbin = int(round(fmid*Tobs))
+    N = next_pow_two(int(round(4*Tobs*slow_bw(f0, fdot, fddot, Tobs))))
 
     sigma = sqrt(Tobs*Sn(f0)/4.0)
 
@@ -456,35 +440,37 @@ if __name__ == '__main__':
         E_re_data += E_re
         E_im_data += E_im
 
-    model = make_model(f0, args.sigma_f0, sigma, hbin, log(args.Amin), log(args.Amax))
+    if args.start_point is not None:
+        sp = genfromtxt(args.start_point, names=True)
+        dphis = dphis_from_fs(Tobs, sp['f0'], sp['fdot'], sp['fddot'])
+
+        n_phi0 = [cos(sp['phi0']), sin(sp['phi0'])]
+        n_psi = [cos(2.0*sp['psi']), sin(2.0*sp['psi'])]
+
+        nhat = [cos(sp['phi'])*sin(sp['theta']),
+                sin(sp['phi'])*sin(sp['theta']),
+                cos(sp['theta'])]
+
+        start_pt = {
+            'dphis': dphis,
+            'cos_iota': sp['cos_iota'],
+            'n_phi': n_phi0,
+            'n_2psi': n_psi,
+            'n_ra_dec': nhat,
+            'lnA': log(sp['A'])
+        }
+    else:
+        start_pt = {}
+
+    model = make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, dphis, sigma, hbin, log(args.Amin), log(args.Amax), N, start_pt=start_pt)
 
     rstate = np.random.get_state()
-    if args.sample_seed is not None:
-        np.random.seed(args.sample_seed)
 
-    if n_tune < 100:
-        warnings.warn('cannot have fewer than 100 tuning steps; adjusting tune')
-        n_tune = 100
-    n_start = 25
-    n_burn = int(round(0.1*n_tune)) # Final 10% of samples for last tuning.
-    n_window = n_start * 2 ** np.arange(np.floor(np.log2((n_tune - n_burn) / n_start)))
-    n_window[-1] += n_tune - n_burn - np.sum(n_window) # Close out with a slightly longer tuning.
-    n_window = n_window.astype(int)
     with model:
-        start = None
-        burnin_trace = None
-        for steps in n_window:
-            step = get_step_for_trace(burnin_trace)
-            burnin_trace = pm.sample(
-                start=start, tune=steps, draws=2, step=step,
-                compute_convergence_checks=False, discard_tuned_samples=False, chains=args.chains, cores=args.cores)
-            start = [t[-1] for t in burnin_trace._straces.values()]
-
-        step = get_step_for_trace(burnin_trace)
-        trace = pm.sample(draws=args.draws, tune=n_burn, step=step, start=start, chains=args.chains, cores=args.cores)
-
-    if args.sample_seed is not None:
-        np.random.set_state(rstate)
+        trace = pm.sample(draws=args.draws,
+                          tune=n_tune,
+                          chains=args.chains,
+                          cores=args.cores)
 
     fit = az.from_pymc3(trace)
 

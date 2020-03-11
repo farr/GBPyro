@@ -12,9 +12,16 @@ code.
 Try out the command-line:
 
 ```shell
-python gbfit.py --seed 1792656085 --Tobs 6.28e7 --injfile testinj.dat --f0 1e-3 --sigma-f0 1.6e-8 --outfile testinj.nc
+python gbfit.py --seed 1792656085 --Tobs 6.28e7 --injfile testinj.dat --f0 1e-3 --fdot 0 --fddot 0 --outfile testinj.nc
 ```
 
-And then have a look at the plots in `testinj.ipynb`.
+And then have a look at, and regenerate, the plots in `testinj.ipynb`.
 
-If you want an actual test on a verification binary, have a go at
+A more challenging test (much larger `fdot`) will be
+
+```shell
+python gbfit.py --seed 1300839501 --Tobs 6.28e7 --injfile testinj2.dat --f0 0.015248 --fdot 2.58342e-14 --fddot 1.60490223549e-25 --outfile testinj2.nc
+```
+
+(Plots in `testinj2.ipynb`.)  You can also try running this system for more or
+less observation time.
