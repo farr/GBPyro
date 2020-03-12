@@ -529,7 +529,7 @@ class QuadPotentialFullAdapt(QuadPotentialFull):
         )
         self._background_cov = _WeightedCovariance(
             self._n, dtype=self.dtype,
-            initial_covariance=np.eye(n, dtype=dtype)/adaptation_window
+            initial_covariance=np.eye(n, dtype=dtype)
         )
         self._n_samples = 0
 
@@ -566,7 +566,7 @@ class QuadPotentialFullAdapt(QuadPotentialFull):
             self._foreground_cov = self._background_cov
             self._background_cov = _WeightedCovariance(
                 self._n, dtype=self.dtype,
-                initial_covariance=np.eye(self._n, dtype=self.dtype)/self.adaptation_window
+                initial_covariance=np.eye(self._n, dtype=self.dtype)
             )
 
             self._previous_update = self._n_samples
