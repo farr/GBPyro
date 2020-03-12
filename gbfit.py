@@ -358,6 +358,7 @@ if __name__ == '__main__':
     sampg = parser.add_argument_group('Sampling')
     sampg.add_argument('--draws', metavar='N', default=1000, type=int, help='number of samples to draw (default: %(default)s)')
     sampg.add_argument('--tune', metavar='N', type=int, help='number of tuning samples (default: same as --draws)')
+    sampg.add_argument('--target-accept', metavar='FRAC', type=float, default=0.8, help='target HMC acceptance rate (default: %(default)s)')
     sampg.add_argument('--chains', metavar='N', type=int, default=3, help='number of independent chains (default: %(default)s)')
     sampg.add_argument('--cores', metavar='N', type=int, default=3, help='number of cores to use for sampling (default: %(default)s)')
     sampg.add_argument('--diag-mass-matrix', action='store_true', help='use diagonal mass matrix')
@@ -474,7 +475,8 @@ if __name__ == '__main__':
                           tune=n_tune,
                           chains=args.chains,
                           cores=args.cores,
-                          step=pm.NUTS(potential=QuadPotentialFullAdapt(model.ndim, zeros(model.ndim))),
+                          step=pm.NUTS(potential=QuadPotentialFullAdapt(model.ndim, zeros(model.ndim)),
+                                       target_accept=args.target_accept),
                           start=start_pt,
                           init=init)
 
