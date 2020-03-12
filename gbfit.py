@@ -475,8 +475,7 @@ if __name__ == '__main__':
                           tune=n_tune,
                           chains=args.chains,
                           cores=args.cores,
-                          step=pm.NUTS(potential=QuadPotentialFullAdapt(model.ndim, zeros(model.ndim)),
-                                       target_accept=args.target_accept),
+                          #step=pm.NUTS(potential=QuadPotentialFullAdapt(model.ndim, zeros(model.ndim)), target_accept=args.target_accept),
                           start=start_pt,
                           init=init)
 
