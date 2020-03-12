@@ -7,6 +7,7 @@ import os
 import os.path as op
 import pymc3 as pm
 import pymc3.math as pmm
+from quadpotential import QuadPotentialFullAdapt
 import theano
 import theano.tensor as tt
 import theano.tensor.fft as ttf
@@ -459,8 +460,10 @@ if __name__ == '__main__':
             'n_ra_dec': nhat,
             'lnA': log(sp['A'])
         }
+        init = 'adapt_step'
     else:
         start_pt = {}
+        init = 'auto'
 
     model = make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, dphis, sigma, hbin, log(args.Amin), log(args.Amax), N, start_pt=start_pt)
 
@@ -470,7 +473,10 @@ if __name__ == '__main__':
         trace = pm.sample(draws=args.draws,
                           tune=n_tune,
                           chains=args.chains,
-                          cores=args.cores)
+                          cores=args.cores,
+                          step=pm.NUTS(potential=QuadPotentialFullAdapt(model.ndim, zeros(model.ndim))),
+                          start=start_pt,
+                          init=init)
 
     fit = az.from_pymc3(trace)
 

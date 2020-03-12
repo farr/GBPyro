@@ -12,6 +12,9 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
+# Minor modifications by Will M. Farr <wfarr@flatironinstitute.org> to stabilize
+# QuadPotentialFullAdapt.
+
 import warnings
 import numpy as np
 from numpy.random import normal
@@ -524,7 +527,10 @@ class QuadPotentialFullAdapt(QuadPotentialFull):
         self._foreground_cov = _WeightedCovariance(
             self._n, initial_mean, initial_cov, initial_weight, self.dtype
         )
-        self._background_cov = _WeightedCovariance(self._n, dtype=self.dtype)
+        self._background_cov = _WeightedCovariance(
+            self._n, dtype=self.dtype,
+            initial_covariance=np.eye(n, dtype=dtype)/adaptation_window
+        )
         self._n_samples = 0
 
         self.adaptation_window = int(adaptation_window)
@@ -559,7 +565,8 @@ class QuadPotentialFullAdapt(QuadPotentialFull):
         if delta >= self.adaptation_window:
             self._foreground_cov = self._background_cov
             self._background_cov = _WeightedCovariance(
-                self._n, dtype=self.dtype
+                self._n, dtype=self.dtype,
+                initial_covariance=np.eye(self._n, dtype=self.dtype)/self.adaptation_window
             )
 
             self._previous_update = self._n_samples
