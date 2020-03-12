@@ -461,7 +461,7 @@ if __name__ == '__main__':
             'n_ra_dec': nhat,
             'lnA': log(sp['A'])
         }
-        init = 'adapt_step'
+        init = 'adapt_diag'
     else:
         start_pt = {}
         init = 'auto'
