@@ -300,7 +300,9 @@ def AET_XYZ(X_re, X_im, Y_re, Y_im, Z_re, Z_im):
     return ((A_re, A_im), (E_re, E_im), (T_re, T_im))
 
 def make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, f0, fdot, fddot, sigma, hbin, lnAlow, lnAhigh, N, start_pt={}):
-    legendre_param_mean = phi0_fs_to_lp(0.0, f0, fdot, fddot, Tobs)
+    f0_mean = f0
+    fdot_mean = fdot
+    fddot_mean = fddot
 
     with pm.Model() as model:
         _ = pm.Data('sigma', sigma)
@@ -312,41 +314,16 @@ def make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, f0, fdot, fddot
         E_re_data = pm.Data('E_re_data', E_re_data)
         E_im_data = pm.Data('E_im_data', E_im_data)
 
-        # This parameterization bears some discussion.  Under the intuition that
-        # we are primarily performing linear regression on the phase,
-        #
-        # phi(t) = phi0 + 2*pi*f*t + pi*fdot*t^2 + pi*fddot*t^3/3 + ...
-        #
-        # then the natural orthonormal basis to use is the Legendre polynomials:
-        #
-        # P0(x) = 1
-        # P1(x) = x
-        # P2(x) = 1/2(3x^2 - 1)
-        # P3(x) = 1/2(5x^3 - 3x)
-        #
-
-        # These are defined on -1 < x < 1, so there are some additional unit
-        # conversions to handle in transforming between phi0, f, fdot, fddot and
-        # the basis of Legendre coefficients; see phi0_fs_to_lp and
-        # lp_to_phi0_fs functions above.
-
-        # The first legendre coefficient (on the constant P0) we treat as an
-        # overall phase, using the 2D gaussian trick to produce it with a prior
-        # that is uniform in [-pi, pi].  The remaining three are given normal
-        # priors with s.d. pi about the estimated f0, fdot, fddot given in the
-        # function above.
         n_phi = pm.Normal('n_phi', mu=zeros(2), sigma=ones(2), shape=(2,), testval=start_pt.get('n_phi', randn(2)))
-        l0 = tt.arctan2(n_phi[1], n_phi[0])
+        phi0 = pm.Deterministic('phi0', tt.arctan2(n_phi[1], n_phi[0]))
 
-        ls = pm.Normal('legendre_coeffs_zero', mu=zeros(3), sigma=pi, shape=(3,), testval=zeros(3))
-        lcoeff = pm.Deterministic('legendre_coeffs', tt.concatenate(([l0], ls+legendre_param_mean[1:])))
+        dphi_f0 = pm.Normal('dphi_f0', mu=0, sigma=pi, testval=0)
+        dphi_fdot = pm.Normal('dphi_fdot', mu=0, sigma=pi, testval=0)
+        dphi_fddot = pm.Normal('dphi_fddot', mu=0, sigma=pi, testval=0)
 
-        phi0_fs = lp_to_phi0_fs(lcoeff, Tobs)
-
-        phi0 = pm.Deterministic('phi0', phi0_fs[0])
-        f0 = pm.Deterministic('f0', phi0_fs[1])
-        fdot = pm.Deterministic('fdot', phi0_fs[2])
-        fddot = pm.Deterministic('fddot', phi0_fs[3])
+        f0 = pm.Deterministic('f0', f0_mean + dphi_f0/(2*pi*Tobs))
+        fdot = pm.Deterministic('fdot', fdot_mean + dphi_fdot/(pi*Tobs*Tobs))
+        fddot = pm.Deterministic('fddot', fddot_mean + 3.0*dphi_fddot/(pi*Tobs*Tobs*Tobs))
 
         cos_iota = pm.Uniform('cos_iota', lower=-1, upper=1, testval=start_pt.get('cos_iota', np.random.uniform(low=-1, high=1)))
         iota = pm.Deterministic('iota', tt.arccos(cos_iota))
