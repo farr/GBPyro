@@ -11,19 +11,38 @@ from quadpotential import QuadPotentialFullAdapt
 import theano
 import theano.tensor as tt
 import theano.tensor.fft as ttf
+import theano.tensor.slinalg as tts
 import warnings
 
 theano.config.gcc.cxxflags = "-Wno-c++11-narrowing"
 
-def dphis_from_fs(Tobs, f, fdot, fddot):
-    def phase(t):
-        return 2*pi*t*(f + t/2*(fdot + t/3*fddot))
+"""This maps the polynomial basis {1, t/Tobs, (t/Tobs)^2, (t/Tobs)^3} into a
+basis of Legendre polynomials that are orthogonal and normalized to 1 at t = 0.
+"""
+poly_basis_to_legendre_basis = \
+    np.array([[1.0, 0.0, 0.0, 0.0],
+              [-1.0, 2.0, 0.0, 0.0],
+              [1.0, -6.0, 6.0, 0.0],
+              [-1.0, 12.0, -30.0, 20.0]])
 
-    phi1 = phase(Tobs/3)
-    phi2 = phase(2*Tobs/3)
-    phi3 = phase(Tobs)
+def phi0_fs_to_lp(phi0, f0, fdot, fddot, Tobs):
+    Tobs2 = Tobs*Tobs
+    Tobs3 = Tobs2*Tobs
+    phis = np.array([phi0, 2.0*pi*f0*Tobs, pi*fdot*Tobs2, pi/3.0*fddot*Tobs3])
 
-    return array([phi1, phi2-phi1, phi3-phi2])
+    return np.dot(poly_basis_to_legendre_basis, phis)
+
+def lp_to_phi0_fs(lp, Tobs):
+    Tobs2 = Tobs*Tobs
+    Tobs3 = Tobs2*Tobs
+    phis = tts.solve(poly_basis_to_legendre_basis, lp)
+
+    phi0 = phis[0]
+    f0 = phis[1]/(2.0*pi*Tobs)
+    fdot = phis[2]/(pi*Tobs2)
+    fddot = phis[3]/(pi/3.0*Tobs3)
+
+    return (phi0, f0, fdot, fddot)
 
 # I sure hope L is in m
 def Sn(fs, L=5e9):
@@ -280,7 +299,9 @@ def AET_XYZ(X_re, X_im, Y_re, Y_im, Z_re, Z_im):
 
     return ((A_re, A_im), (E_re, E_im), (T_re, T_im))
 
-def make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, three_dphi_prior, sigma, hbin, lnAlow, lnAhigh, N, start_pt={}):
+def make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, f0, fdot, fddot, sigma, hbin, lnAlow, lnAhigh, N, start_pt={}):
+    legendre_param_mean = phi0_fs_to_lp(0.0, f0, fdot, fddot, Tobs)
+
     with pm.Model() as model:
         _ = pm.Data('sigma', sigma)
         _ = pm.Data('hbin', hbin)
@@ -291,15 +312,41 @@ def make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, three_dphi_prio
         E_re_data = pm.Data('E_re_data', E_re_data)
         E_im_data = pm.Data('E_im_data', E_im_data)
 
+        # This parameterization bears some discussion.  Under the intuition that
+        # we are primarily performing linear regression on the phase,
+        #
+        # phi(t) = phi0 + 2*pi*f*t + pi*fdot*t^2 + pi*fddot*t^3/3 + ...
+        #
+        # then the natural orthonormal basis to use is the Legendre polynomials:
+        #
+        # P0(x) = 1
+        # P1(x) = x
+        # P2(x) = 1/2(3x^2 - 1)
+        # P3(x) = 1/2(5x^3 - 3x)
+        #
+
+        # These are defined on -1 < x < 1, so there are some additional unit
+        # conversions to handle in transforming between phi0, f, fdot, fddot and
+        # the basis of Legendre coefficients; see phi0_fs_to_lp and
+        # lp_to_phi0_fs functions above.
+
+        # The first legendre coefficient (on the constant P0) we treat as an
+        # overall phase, using the 2D gaussian trick to produce it with a prior
+        # that is uniform in [-pi, pi].  The remaining three are given normal
+        # priors with s.d. pi about the estimated f0, fdot, fddot given in the
+        # function above.
         n_phi = pm.Normal('n_phi', mu=zeros(2), sigma=ones(2), shape=(2,), testval=start_pt.get('n_phi', randn(2)))
-        phi0 = pm.Deterministic('phi0', tt.arctan2(n_phi[1], n_phi[0]))
+        l0 = tt.arctan2(n_phi[1], n_phi[0])
 
-        dphis = pm.Normal('dphis', mu=three_dphi_prior, sigma=2*pi/sqrt(3), shape=(3,), testval=start_pt.get('dphis', three_dphi_prior))
-        phis = phi0 + tt.cumsum(dphis)
+        ls = pm.Normal('legendre_coeffs_zero', mu=zeros(3), sigma=pi, shape=(3,), testval=zeros(3))
+        lcoeff = pm.Deterministic('legendre_coeffs', tt.concatenate(([l0], ls+legendre_param_mean[1:])))
 
-        f0 = pm.Deterministic('f0', -((11*phi0 - 18*phis[0] + 9*phis[1] - 2*phis[2])/(4*pi*Tobs)))
-        fdot = pm.Deterministic('fdot', (9*(2*phi0 - 5*phis[0] + 4*phis[1] - phis[2]))/(2*pi*Tobs*Tobs))
-        fddot = pm.Deterministic('fddot', -((27*(phi0 - 3*phis[0] + 3*phis[1] - phis[2]))/(2*pi*Tobs*Tobs*Tobs)))
+        phi0_fs = lp_to_phi0_fs(lcoeff, Tobs)
+
+        phi0 = pm.Deterministic('phi0', phi0_fs[0])
+        f0 = pm.Deterministic('f0', phi0_fs[1])
+        fdot = pm.Deterministic('fdot', phi0_fs[2])
+        fddot = pm.Deterministic('fddot', phi0_fs[3])
 
         cos_iota = pm.Uniform('cos_iota', lower=-1, upper=1, testval=start_pt.get('cos_iota', np.random.uniform(low=-1, high=1)))
         iota = pm.Deterministic('iota', tt.arccos(cos_iota))
@@ -382,12 +429,10 @@ if __name__ == '__main__':
     fdot = args.fdot
     fddot = args.fddot
 
-    dphis = dphis_from_fs(Tobs, f0, fdot, fddot)
-
     fmid = f0 + fdot*Tobs/2 + fddot*Tobs/8
 
     hbin = int(round(fmid*Tobs))
-    N = next_pow_two(int(round(4*Tobs*slow_bw(f0, fdot, fddot, Tobs))))
+    N = next_pow_two(int(round(2.1*Tobs*slow_bw(f0, fdot, fddot, Tobs))))
 
     sigma = sqrt(Tobs*Sn(f0)/4.0)
 
@@ -444,9 +489,9 @@ if __name__ == '__main__':
 
     if args.start_point is not None:
         sp = genfromtxt(args.start_point, names=True)
-        dphis = dphis_from_fs(Tobs, sp['f0'], sp['fdot'], sp['fddot'])
+        lps = phi0_fs_to_lp(sp['phi0'], sp['f0'], sp['fdot'], sp['fddot'], Tobs)
 
-        n_phi0 = [cos(sp['phi0']), sin(sp['phi0'])]
+        n_phi0 = [cos(lps[0]), sin(lps[0])]
         n_psi = [cos(2.0*sp['psi']), sin(2.0*sp['psi'])]
 
         nhat = [cos(sp['phi'])*sin(sp['theta']),
@@ -454,7 +499,7 @@ if __name__ == '__main__':
                 cos(sp['theta'])]
 
         start_pt = {
-            'dphis': dphis,
+            'legendre_coeffs': lps[1:],
             'cos_iota': sp['cos_iota'],
             'n_phi': n_phi0,
             'n_2psi': n_psi,
@@ -466,7 +511,7 @@ if __name__ == '__main__':
         start_pt = {}
         init = 'auto'
 
-    model = make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, dphis, sigma, hbin, log(args.Amin), log(args.Amax), N, start_pt=start_pt)
+    model = make_model(A_re_data, A_im_data, E_re_data, E_im_data, Tobs, f0, fdot, fddot, sigma, hbin, log(args.Amin), log(args.Amax), N, start_pt=start_pt)
 
     rstate = np.random.get_state()
 
@@ -475,7 +520,7 @@ if __name__ == '__main__':
                           tune=n_tune,
                           chains=args.chains,
                           cores=args.cores,
-                          #step=pm.NUTS(potential=QuadPotentialFullAdapt(model.ndim, zeros(model.ndim)), target_accept=args.target_accept),
+                          step=pm.NUTS(potential=QuadPotentialFullAdapt(model.ndim, zeros(model.ndim)), target_accept=args.target_accept),
                           start=start_pt,
                           init=init)
 
