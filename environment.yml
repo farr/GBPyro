@@ -3,15 +3,16 @@ channels:
   - conda-forge
   - defaults
 dependencies:
+  - mkl-service
+  - tqdm
+  - theano
   - python=3.7
   - arviz
-  - theano
-  - mkl-service
-  - jupyterlab
-  - seaborn
-  - pandas
   - astropy
+  - jupyterlab
   - nodejs
+  - pandas
   - ipywidgets
-  - tqdm
+  - seaborn
   - pymc3
+  - corner
